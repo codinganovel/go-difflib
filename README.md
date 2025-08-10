@@ -1,9 +1,11 @@
 go-difflib
 ==========
 
-THIS PACKAGE IS NO LONGER MAINTAINED.
+THIS PACKAGE IS NO LONGER MAINTAINED BY THE ORIGINAL AUTHOR.
 
 At this point, I have no longer the time nor the interest to work on go-difflib. I apologize for the inconvenience.
+
+**UPDATE**: This fork is now minimally maintained as I've started using it in a personal project. Basic functionality and Go compatibility will be preserved.
 
 [![GoDoc](https://godoc.org/github.com/pmezard/go-difflib/difflib?status.svg)](https://godoc.org/github.com/pmezard/go-difflib/difflib)
 
@@ -20,7 +22,7 @@ The following class and functions (and related tests) have be ported:
 ## Installation
 
 ```bash
-$ go get github.com/pmezard/go-difflib/difflib
+go get github.com/codinganovel/go-difflib/difflib
 ```
 
 ### Quick Start

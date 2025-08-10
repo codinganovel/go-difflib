@@ -102,7 +102,7 @@ group
 	}
 }
 
-func ExampleGetUnifiedDiffCode() {
+func ExampleWriteUnifiedDiff() {
 	a := `one
 two
 three
@@ -135,7 +135,7 @@ four`
 	// -fmt.Printf("%s,%T",a,b)
 }
 
-func ExampleGetContextDiffCode() {
+func ExampleWriteContextDiff() {
 	a := `one
 two
 three
