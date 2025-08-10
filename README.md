@@ -7,7 +7,7 @@ At this point, I have no longer the time nor the interest to work on go-difflib.
 
 **UPDATE**: This fork is now minimally maintained as I've started using it in a personal project. Basic functionality and Go compatibility will be preserved.
 
-[![GoDoc](https://godoc.org/github.com/pmezard/go-difflib/difflib?status.svg)](https://godoc.org/github.com/pmezard/go-difflib/difflib)
+[![GoDoc](https://godoc.org/github.com/codinganovel/go-difflib/difflib?status.svg)](https://godoc.org/github.com/codinganovel/go-difflib/difflib)
 
 Go-difflib is a partial port of python 3 difflib package. Its main goal
 was to make unified and context diff available in pure Go, mostly for
