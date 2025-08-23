@@ -424,3 +424,129 @@ func BenchmarkSplitLines100(b *testing.B) {
 func BenchmarkSplitLines10000(b *testing.B) {
 	benchmarkSplitLines(b, 10000)
 }
+
+func ExampleGetCloseMatches() {
+	matches := GetCloseMatches("appel", []string{"ape", "apple", "peach", "puppy"}, 2, 0.6)
+	fmt.Println(matches)
+	// Output:
+	// [apple ape]
+}
+
+func ExampleNDiff() {
+	a := SplitLines("one\ntwo\nthree")
+	b := SplitLines("zero\none\nthree")
+	delta := NDiff(a, b)
+	fmt.Print(strings.Join(delta, ""))
+	// Output:
+	// + zero
+	//   one
+	// - two
+	//   three
+}
+
+func ExampleDiffer_Compare() {
+    d := &Differ{}
+    delta := d.Compare(SplitLines("abc"), SplitLines("axc"))
+    // Trim trailing spaces on intraline lines for stable example output.
+    for i, s := range delta {
+        if strings.HasPrefix(s, "? ") {
+            s = strings.TrimRight(s, " \n") + "\n"
+            delta[i] = s
+        }
+    }
+    fmt.Print(strings.Join(delta, ""))
+    // Output:
+    // - abc
+    // ?  ^
+    // + axc
+    // ?  ^
+}
+
+func TestIsLineJunk(t *testing.T) {
+	// Blank
+	assertEqual(t, IsLineJunk("\n"), true)
+	assertEqual(t, IsLineJunk("   \n"), true)
+	// Only '#'
+	assertEqual(t, IsLineJunk("  #   \n"), true)
+	// Non-junk
+	assertEqual(t, IsLineJunk("hello\n"), false)
+	assertEqual(t, IsLineJunk("#notjunk\n"), false)
+}
+
+func TestIsCharacterJunk(t *testing.T) {
+	assertEqual(t, IsCharacterJunk(' '), true)
+	assertEqual(t, IsCharacterJunk('\t'), true)
+	assertEqual(t, IsCharacterJunk('\n'), false)
+	assertEqual(t, IsCharacterJunk('x'), false)
+}
+
+func TestGetCloseMatches(t *testing.T) {
+	poss := []string{"ape", "apple", "peach", "puppy"}
+	got := GetCloseMatches("appel", poss, 3, 0.6)
+	// Expect order by score desc with ties by original order; Python example yields ["apple", "ape"].
+	assertEqual(t, got[:2], []string{"apple", "ape"})
+
+	// Edge cases
+	assertEqual(t, GetCloseMatches("", poss, 0, 0.6) == nil, true)
+	assertEqual(t, GetCloseMatches("abc", poss, 3, -0.1) == nil, true)
+	assertEqual(t, GetCloseMatches("abc", poss, 3, 1.1) == nil, true)
+
+	// High cutoff yields empty
+	assertEqual(t, len(GetCloseMatches("appel", poss, 3, 0.95)) == 0, true)
+}
+
+func TestNDiffRestoreRoundTrip(t *testing.T) {
+	a := SplitLines("  1. Beautiful is better than ugly.\n  2. Explicit is better than implicit.\n  3. Simple is better than complex.\n  4. Complex is better than complicated.\n")
+	b := SplitLines("  1. Beautiful is better than ugly.\n  3.   Simple is better than complex.\n  4. Complicated is better than complex.\n  5. Flat is better than nested.\n")
+
+	delta := NDiff(a, b)
+	a2 := Restore(delta, 1)
+	b2 := Restore(delta, 2)
+
+	assertEqual(t, a2, a)
+	assertEqual(t, b2, b)
+
+	// Ensure no '? ' lines are present in the basic ndiff output
+	for _, line := range delta {
+		if len(line) >= 2 {
+			p := line[:2]
+			if p != "  " && p != "+ " && p != "- " {
+				t.Fatalf("unexpected ndiff prefix: %q in line %q", p, line)
+			}
+		}
+	}
+}
+
+func TestDifferRestoreRoundTrip(t *testing.T) {
+	a := SplitLines("one two three\nalpha beta\n")
+	b := SplitLines("one tree three\nalpha bet\n")
+	d := &Differ{}
+	delta := d.Compare(a, b)
+	a2 := Restore(delta, 1)
+	b2 := Restore(delta, 2)
+	assertEqual(t, a2, a)
+	assertEqual(t, b2, b)
+}
+
+func TestDifferIntralineSimple(t *testing.T) {
+	a := SplitLines("abc\n")
+	b := SplitLines("axc\n")
+	d := &Differ{}
+	delta := d.Compare(a, b)
+	// Allow an optional final equal newline entry (since SplitLines adds a terminal "\n").
+	if !(len(delta) == 4 || len(delta) == 5) {
+		t.Fatalf("unexpected delta length: %d (%v)", len(delta), delta)
+	}
+	// First four entries should be the replacement pair with intraline guides.
+	assertEqual(t, delta[0], "- abc\n")
+	if !(strings.HasPrefix(delta[1], "? ") && strings.Contains(delta[1], " ^ ") && strings.HasSuffix(delta[1], "\n")) {
+		t.Fatalf("unexpected intraline for a: %q", delta[1])
+	}
+	assertEqual(t, delta[2], "+ axc\n")
+	if !(strings.HasPrefix(delta[3], "? ") && strings.Contains(delta[3], " ^ ") && strings.HasSuffix(delta[3], "\n")) {
+		t.Fatalf("unexpected intraline for b: %q", delta[3])
+	}
+	if len(delta) == 5 {
+		assertEqual(t, delta[4], "  \n")
+	}
+}

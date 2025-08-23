@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 )
 
@@ -193,12 +194,15 @@ func (m *SequenceMatcher) isBJunk(s string) bool {
 // If IsJunk is not defined:
 //
 // Return (i,j,k) such that a[i:i+k] is equal to b[j:j+k], where
-//     alo <= i <= i+k <= ahi
-//     blo <= j <= j+k <= bhi
+//
+//	alo <= i <= i+k <= ahi
+//	blo <= j <= j+k <= bhi
+//
 // and for all (i',j',k') meeting those conditions,
-//     k >= k'
-//     i <= i'
-//     and if i == i', j <= j'
+//
+//	k >= k'
+//	i <= i'
+//	and if i == i', j <= j'
 //
 // In other words, of all maximal matching blocks, return one that
 // starts earliest in a, and of all those maximal matching blocks that
@@ -763,4 +767,263 @@ func SplitLines(s string) []string {
 	lines := strings.SplitAfter(s, "\n")
 	lines[len(lines)-1] += "\n"
 	return lines
+}
+
+// IsLineJunk reports whether a line is ignorable: blank or containing only a single '#',
+// possibly surrounded by whitespace. Trailing "\n" is ignored for the purpose of this check.
+// This mirrors Python difflib's IS_LINE_JUNK default.
+func IsLineJunk(line string) bool {
+	if strings.HasSuffix(line, "\n") {
+		line = strings.TrimSuffix(line, "\n")
+	}
+	t := strings.TrimSpace(line)
+	return t == "" || t == "#"
+}
+
+// IsCharacterJunk reports whether a rune is ignorable: a space or a tab.
+// This mirrors Python difflib's IS_CHARACTER_JUNK default.
+func IsCharacterJunk(r rune) bool { return r == ' ' || r == '\t' }
+
+// GetCloseMatches returns a list (up to n) of the best "good enough" matches
+// from possibilities for the given word. Only candidates scoring at least
+// cutoff (in [0.0, 1.0]) are returned, ordered by similarity descending and
+// then by original order for ties. If n <= 0 or cutoff is outside [0,1],
+// it returns an empty slice.
+func GetCloseMatches(word string, possibilities []string, n int, cutoff float64) []string {
+	if n <= 0 || cutoff < 0.0 || cutoff > 1.0 {
+		return nil
+	}
+
+	// Helper to split into runes as []string elements for SequenceMatcher.
+	splitRunes := func(s string) []string {
+		// Allocate approximately len(s) elements; final may be smaller for multibyte runes.
+		out := make([]string, 0, len(s))
+		for _, r := range s {
+			out = append(out, string(r))
+		}
+		return out
+	}
+
+	mb := splitRunes(word)
+	m := NewMatcher(nil, mb)
+
+	type cand struct {
+		score float64
+		idx   int
+		val   string
+	}
+	results := make([]cand, 0, len(possibilities))
+	for i, p := range possibilities {
+		ma := splitRunes(p)
+		m.SetSeq1(ma)
+		if m.RealQuickRatio() >= cutoff && m.QuickRatio() >= cutoff {
+			s := m.Ratio()
+			if s >= cutoff {
+				results = append(results, cand{score: s, idx: i, val: p})
+			}
+		}
+	}
+
+	sort.SliceStable(results, func(i, j int) bool {
+		if results[i].score == results[j].score {
+			return results[i].idx < results[j].idx // preserve original order on ties
+		}
+		return results[i].score > results[j].score
+	})
+
+	if len(results) > n {
+		results = results[:n]
+	}
+	out := make([]string, len(results))
+	for i, c := range results {
+		out[i] = c.val
+	}
+	return out
+}
+
+// NDiff returns a basic human-readable delta between a and b (lists of lines),
+// using prefixes similar to Python's difflib.ndiff:
+//
+//	"- " line unique to sequence a
+//	"+ " line unique to sequence b
+//	"  " line common to both sequences
+//
+// This basic version does not include intraline "? " guide lines.
+func NDiff(a, b []string) []string {
+	m := NewMatcher(a, b)
+	var out []string
+	for _, op := range m.GetOpCodes() {
+		switch op.Tag {
+		case 'e':
+			for _, line := range a[op.I1:op.I2] {
+				out = append(out, "  "+line)
+			}
+		case 'd':
+			for _, line := range a[op.I1:op.I2] {
+				out = append(out, "- "+line)
+			}
+		case 'i':
+			for _, line := range b[op.J1:op.J2] {
+				out = append(out, "+ "+line)
+			}
+		case 'r':
+			for _, line := range a[op.I1:op.I2] {
+				out = append(out, "- "+line)
+			}
+			for _, line := range b[op.J1:op.J2] {
+				out = append(out, "+ "+line)
+			}
+		}
+	}
+	return out
+}
+
+// Restore reconstructs one of the original sequences (1 or 2) from an ndiff
+// style delta (as produced by NDiff). Lines starting with "? " are ignored if
+// present. Returns nil if 'which' is not 1 or 2.
+func Restore(delta []string, which int) []string {
+	if which != 1 && which != 2 {
+		return nil
+	}
+	keepPrefix := "  "
+	wantPrefix := "- "
+	if which == 2 {
+		wantPrefix = "+ "
+	}
+	var out []string
+	for _, d := range delta {
+		if len(d) < 2 {
+			continue
+		}
+		prefix := d[:2]
+		if prefix == keepPrefix || prefix == wantPrefix {
+			out = append(out, d[2:])
+		}
+		// ignore other prefixes (e.g., "+ " when which==1, "- " when which==2, and "? ")
+	}
+	return out
+}
+
+// Differ produces human-readable deltas from sequences of lines of text.
+// It can emit intraline "? " guide lines highlighting character-level changes.
+type Differ struct {
+	// LineJunk filters ignorable lines. Currently unused in Compare scaffolding.
+	LineJunk func(string) bool
+	// CharJunk filters ignorable characters when computing intraline hints.
+	// Currently unused; placeholder for parity with Python API.
+	CharJunk func(rune) bool
+}
+
+// Compare returns an ndiff-style delta including intraline hints for replacements.
+// Prefixes:
+//
+//	"- " line unique to sequence a
+//	"+ " line unique to sequence b
+//	"  " line common to both sequences
+//	"? " intraline difference guides (only for replacements)
+func (d *Differ) Compare(a, b []string) []string {
+	m := NewMatcher(a, b)
+	var out []string
+	for _, op := range m.GetOpCodes() {
+		switch op.Tag {
+		case 'e':
+			for _, line := range a[op.I1:op.I2] {
+				out = append(out, "  "+line)
+			}
+		case 'd':
+			for _, line := range a[op.I1:op.I2] {
+				out = append(out, "- "+line)
+			}
+		case 'i':
+			for _, line := range b[op.J1:op.J2] {
+				out = append(out, "+ "+line)
+			}
+		case 'r':
+			// Pair up lines greedily; remaining are treated as pure inserts/deletes.
+			as := a[op.I1:op.I2]
+			bs := b[op.J1:op.J2]
+			n := min(len(as), len(bs))
+			for i := 0; i < n; i++ {
+				aline := as[i]
+				bline := bs[i]
+				atags, btags := buildIntralineTags(aline, bline)
+				out = append(out, "- "+aline)
+				if atags != "" {
+					out = append(out, "? "+atags+"\n")
+				}
+				out = append(out, "+ "+bline)
+				if btags != "" {
+					out = append(out, "? "+btags+"\n")
+				}
+			}
+			// Remaining deletions
+			for _, line := range as[n:] {
+				out = append(out, "- "+line)
+			}
+			// Remaining insertions
+			for _, line := range bs[n:] {
+				out = append(out, "+ "+line)
+			}
+		}
+	}
+	return out
+}
+
+// buildIntralineTags returns tag strings (without trailing newline) for aline and bline,
+// using '^' for replacements, '-' for deletions (aline only) and '+' for insertions (bline only).
+func buildIntralineTags(aline, bline string) (string, string) {
+	// Strip trailing newlines for alignment purposes
+	if strings.HasSuffix(aline, "\n") {
+		aline = strings.TrimSuffix(aline, "\n")
+	}
+	if strings.HasSuffix(bline, "\n") {
+		bline = strings.TrimSuffix(bline, "\n")
+	}
+
+	split := func(s string) []string {
+		out := make([]string, 0, len(s))
+		for _, r := range s {
+			out = append(out, string(r))
+		}
+		return out
+	}
+	ma := split(aline)
+	mb := split(bline)
+	sm := NewMatcher(ma, mb)
+	var atags, btags strings.Builder
+	for _, oc := range sm.GetOpCodes() {
+		switch oc.Tag {
+		case 'e':
+			for i := 0; i < oc.I2-oc.I1; i++ {
+				atags.WriteByte(' ')
+			}
+			for j := 0; j < oc.J2-oc.J1; j++ {
+				btags.WriteByte(' ')
+			}
+		case 'r':
+			for i := 0; i < oc.I2-oc.I1; i++ {
+				atags.WriteByte('^')
+			}
+			for j := 0; j < oc.J2-oc.J1; j++ {
+				btags.WriteByte('^')
+			}
+		case 'd':
+			for i := 0; i < oc.I2-oc.I1; i++ {
+				atags.WriteByte('-')
+			}
+		case 'i':
+			for j := 0; j < oc.J2-oc.J1; j++ {
+				btags.WriteByte('+')
+			}
+		}
+	}
+	aTag := atags.String()
+	bTag := btags.String()
+	if strings.TrimSpace(aTag) == "" {
+		aTag = ""
+	}
+	if strings.TrimSpace(bTag) == "" {
+		bTag = ""
+	}
+	return aTag, bTag
 }
