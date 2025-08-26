@@ -285,6 +285,19 @@ func TestContextDiffBytes_BinarySafety(t *testing.T) {
 	}
 }
 
+func TestNDiffBytes_BinarySafety(t *testing.T) {
+	a := []byte{'x', 0x00, 'y', '\n'}
+	b := []byte{'x', 0x00, 'z', '\n'}
+	out := NDiffBytes(a, b, NDiffOptions{})
+	if len(out) == 0 {
+		t.Fatalf("unexpected empty result for binary ndiff")
+	}
+	// Should not contain '? ' intraline guides in bytes mode
+	if strings.Contains(string(out), "? ") {
+		t.Fatalf("bytes ndiff should not emit intraline guides; got:\n%s", string(out))
+	}
+}
+
 func rep(s string, count int) string {
 	return strings.Repeat(s, count)
 }

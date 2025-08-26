@@ -5,7 +5,7 @@ THIS PACKAGE IS NO LONGER MAINTAINED BY THE ORIGINAL AUTHOR.
 
 At this point, I have no longer the time nor the interest to work on go-difflib. I apologize for the inconvenience.
 
-**UPDATE**: This fork is now minimally maintained as I've started using it in a personal project. Basic functionality and Go compatibility will be preserved.
+**UPDATE**: This fork is now minimally maintained as I've started using it in a personal project. Basic functionality and Go compatibility will be preserved. Recent updates add ndiff options, byte-oriented adapters, and intraline hints with junk filters.
 
 [![GoDoc](https://godoc.org/github.com/codinganovel/go-difflib/difflib?status.svg)](https://godoc.org/github.com/codinganovel/go-difflib/difflib)
 
@@ -19,8 +19,9 @@ The following class and functions (and related tests) have be ported:
 * `unified_diff()`
 * `context_diff()`
 * `get_close_matches()` (as `GetCloseMatches`)
-* `ndiff()` + `restore()` (as `NDiff` and `Restore`) — basic version
-* `Differ` (with simple intraline "? " hints)
+* `ndiff()` + `restore()` (as `NDiff`, `NDiffWith`, `NDiffBytes`, and `Restore`)
+* `Differ` (with intraline "? " hints; honors line/char junk filters)
+* Byte adapters for unified/context diffs (`GetUnifiedDiffBytes`, `GetContextDiffBytes`)
 
 ## Installation
 
@@ -65,11 +66,36 @@ delta := d.Compare(
 //   "  " (equal), "- " (delete), "+ " (insert), "? " (intraline guide)
 ```
 
+NDiff with options (line/char junk filters, intraline hints):
+
+```go
+delta := difflib.NDiffWith(
+    difflib.SplitLines("abc\n"),
+    difflib.SplitLines("axc\n"),
+    difflib.NDiffOptions{Intraline: true, CharJunk: difflib.IsCharacterJunk},
+)
+```
+
+Byte-oriented ndiff (no intraline hints, binary safe):
+
+```go
+out := difflib.NDiffBytes([]byte("one\ntwo\n"), []byte("one\n2\n"), difflib.NDiffOptions{})
+fmt.Print(string(out))
+```
+
+Unified/Context diffs (bytes):
+
+```go
+u, _ := difflib.GetUnifiedDiffBytes(difflib.UnifiedDiffBytes{A: a, B: b, FromFile: "A", ToFile: "B", Context: 3})
+c, _ := difflib.GetContextDiffBytes(difflib.ContextDiffBytes{A: a, B: b, FromFile: "A", ToFile: "B", Context: 3, Eol: []byte{'\n'}})
+```
+
 ### Notes
 
-- `NDiff` currently emits only line-level changes; intraline "? " guide lines are available via `Differ`.
-- `LineJunk`/`CharJunk` filters are scaffolded on `Differ` but not yet active.
-- `diff_bytes` and `HtmlDiff` are not yet implemented; see `TO-DO.md` for parity tasks.
+- `NDiff` remains a simple, line-only API for compatibility. Use `NDiffWith` for intraline and junk filters.
+- `Differ.Compare` honors `LineJunk`/`CharJunk` and emits intraline `"? "` hints.
+- Byte adapters avoid decoding and are safe for non‑UTF‑8 data; intraline is disabled in `NDiffBytes`.
+- `HtmlDiff` is not yet implemented; see `TO-DO.md` for remaining parity tasks.
 
 ## API
 
@@ -80,7 +106,7 @@ func NDiff(a, b []string) []string
 ```
 
 - Emits ndiff-style lines with prefixes: `"  "` (equal), `"- "` (delete), `"+ "` (insert).
-- Does not include intraline `"? "` guide lines; use `Differ` for those.
+- Does not include intraline `"? "` guide lines; use `NDiffWith` (with `Intraline: true`) or `Differ` for those.
 - Inputs should be `SplitLines(...)` output to preserve end-of-line markers.
 - Output is suitable for `Restore` to reconstruct either original sequence.
 
@@ -98,8 +124,8 @@ func Restore(delta []string, which int) []string
 
 ```go
 type Differ struct {
-    LineJunk func(string) bool   // currently not applied
-    CharJunk func(rune) bool     // currently not applied
+    LineJunk func(string) bool
+    CharJunk func(rune) bool
 }
 
 func (d *Differ) Compare(a, b []string) []string
@@ -108,7 +134,42 @@ func (d *Differ) Compare(a, b []string) []string
 - Produces ndiff-style output, including intraline `"? "` hints for replacements.
 - Intraline markers: `^` for replacements, `-` under deletions (aline), `+` under insertions (bline).
 - Trailing spaces may appear in `"? "` lines to align markers with characters; examples trim them for readability.
-- Current implementation pairs replaced lines greedily; advanced "fancy replace" heuristics are TBD.
+- Current implementation pairs replaced lines greedily; advanced "fancy replace" heuristics are planned.
+
+`NDiffWith`
+
+```go
+type NDiffOptions struct {
+    LineJunk  func(string) bool
+    CharJunk  func(rune) bool
+    Intraline bool
+}
+
+func NDiffWith(a, b []string, opts NDiffOptions) []string
+```
+
+- Like `NDiff`, with optional intraline hints and junk filters applied.
+- When `Intraline` is true, `CharJunk` defaults to `IsCharacterJunk` if nil.
+
+`NDiffBytes`
+
+```go
+func NDiffBytes(a, b []byte, opts NDiffOptions) []byte
+```
+
+- Byte-safe ndiff; intraline is disabled even if requested.
+- Use when inputs are arbitrary bytes or not valid UTF‑8.
+
+`UnifiedDiffBytes` / `ContextDiffBytes`
+
+```go
+type UnifiedDiffBytes struct { /* ... */ }
+func GetUnifiedDiffBytes(diff UnifiedDiffBytes) ([]byte, error)
+type ContextDiffBytes = UnifiedDiffBytes
+func GetContextDiffBytes(diff ContextDiffBytes) ([]byte, error)
+```
+
+- Byte-oriented wrappers over unified/context diffs; preserve formatting and headers.
 
 ### Quick Start
 
