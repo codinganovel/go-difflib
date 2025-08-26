@@ -207,6 +207,84 @@ four`
 	//   four
 }
 
+func ExampleGetUnifiedDiffBytes() {
+	a := []byte("one\ntwo\nthree\nfour\nfmt.Printf(\"%s,%T\",a,b)")
+	b := []byte("zero\none\nthree\nfour")
+	diff := UnifiedDiffBytes{
+		A:        a,
+		B:        b,
+		FromFile: "Original",
+		FromDate: "2005-01-26 23:30:50",
+		ToFile:   "Current",
+		ToDate:   "2010-04-02 10:20:52",
+		Context:  3,
+	}
+	out, _ := GetUnifiedDiffBytes(diff)
+	// Print as string for example purposes (raw bytes are fine here).
+	fmt.Println(strings.Replace(string(out), "\t", " ", -1))
+	// Output:
+	// --- Original 2005-01-26 23:30:50
+	// +++ Current 2010-04-02 10:20:52
+	// @@ -1,5 +1,4 @@
+	// +zero
+	//  one
+	// -two
+	//  three
+	//  four
+	// -fmt.Printf("%s,%T",a,b)
+}
+
+func TestUnifiedDiffBytes_EqualsStringUnified_ASCII(t *testing.T) {
+	a := []byte("one\ntwo\nthree\nfour\n")
+	b := []byte("zero\none\nthree\nfour\n")
+	by, err := GetUnifiedDiffBytes(UnifiedDiffBytes{A: a, B: b, FromFile: "A", ToFile: "B", Context: 3})
+	if err != nil {
+		t.Fatalf("bytes unified diff error: %v", err)
+	}
+	st, err := GetUnifiedDiffString(UnifiedDiff{A: SplitLines(string(a)), B: SplitLines(string(b)), FromFile: "A", ToFile: "B", Context: 3})
+	if err != nil {
+		t.Fatalf("string unified diff error: %v", err)
+	}
+	if string(by) != st {
+		t.Fatalf("unified bytes != string\nGot:\n%s\nWant:\n%s", string(by), st)
+	}
+}
+
+func TestContextDiffBytes_EqualsStringContext_ASCII(t *testing.T) {
+	a := []byte("one\ntwo\nthree\nfour\n")
+	b := []byte("zero\none\nthree\nfour\n")
+	by, err := GetContextDiffBytes(ContextDiffBytes{A: a, B: b, FromFile: "A", ToFile: "B", Context: 3})
+	if err != nil {
+		t.Fatalf("bytes context diff error: %v", err)
+	}
+	st, err := GetContextDiffString(ContextDiff{A: SplitLines(string(a)), B: SplitLines(string(b)), FromFile: "A", ToFile: "B", Context: 3, Eol: "\n"})
+	if err != nil {
+		t.Fatalf("string context diff error: %v", err)
+	}
+	if string(by) != st {
+		t.Fatalf("context bytes != string\nGot:\n%s\nWant:\n%s", string(by), st)
+	}
+}
+
+func TestUnifiedDiffBytes_BinarySafety(t *testing.T) {
+	// Contains NUL and 0xFF bytes
+	a := []byte{'a', 0x00, 'b', '\n', 0xFF, 'x', '\n'}
+	b := []byte{'a', 0x00, 'c', '\n', 0xFF, 'x', '\n'}
+	_, err := GetUnifiedDiffBytes(UnifiedDiffBytes{A: a, B: b, Context: 1})
+	if err != nil {
+		t.Fatalf("unexpected error on binary unified diff: %v", err)
+	}
+}
+
+func TestContextDiffBytes_BinarySafety(t *testing.T) {
+	a := []byte{'a', 0x00, 'b', '\n'}
+	b := []byte{'a', 0x00, 'c', '\n'}
+	_, err := GetContextDiffBytes(ContextDiffBytes{A: a, B: b, Context: 1, Eol: []byte{'\n'}})
+	if err != nil {
+		t.Fatalf("unexpected error on binary context diff: %v", err)
+	}
+}
+
 func rep(s string, count int) string {
 	return strings.Repeat(s, count)
 }
@@ -444,6 +522,18 @@ func ExampleNDiff() {
 	//   three
 }
 
+func ExampleNDiffBytes() {
+	a := []byte("one\ntwo\nthree")
+	b := []byte("zero\none\nthree")
+	delta := NDiffBytes(a, b, NDiffOptions{})
+	fmt.Print(string(delta))
+	// Output:
+	// + zero
+	//   one
+	// - two
+	//   three
+}
+
 func ExampleNDiffWith() {
 	a := SplitLines("abc")
 	b := SplitLines("axc")
@@ -470,6 +560,26 @@ func TestNDiffWith_NoIntraline_EqualsNDiff(t *testing.T) {
 	want := NDiff(a, b)
 	if strings.Join(got, "") != strings.Join(want, "") {
 		t.Fatalf("NDiffWith (no intraline) != NDiff\nGot:\n%s\nWant:\n%s", strings.Join(got, ""), strings.Join(want, ""))
+	}
+}
+
+func TestNDiffBytes_EqualsStringNDiff_ASCII(t *testing.T) {
+	a := []byte("one\ntwo\nthree")
+	b := []byte("zero\none\nthree")
+	got := string(NDiffBytes(a, b, NDiffOptions{}))
+	want := strings.Join(NDiff(SplitLines(string(a)), SplitLines(string(b))), "")
+	if got != want {
+		t.Fatalf("NDiffBytes != NDiff (ASCII)\nGot:\n%s\nWant:\n%s", got, want)
+	}
+}
+
+func TestNDiffBytes_IgnoresIntralineOption(t *testing.T) {
+	a := []byte("abc")
+	b := []byte("axc")
+	// Even if Intraline is requested, bytes mode should not emit '? ' lines.
+	out := string(NDiffBytes(a, b, NDiffOptions{Intraline: true}))
+	if strings.Contains(out, "? ") {
+		t.Fatalf("bytes adapter should not emit intraline guides; got:\n%s", out)
 	}
 }
 

@@ -762,12 +762,120 @@ func GetContextDiffString(diff ContextDiff) (string, error) {
 	return string(w.Bytes()), err
 }
 
+// UnifiedDiffBytes mirrors UnifiedDiff but takes raw byte content and Eol as bytes.
+type UnifiedDiffBytes struct {
+	A        []byte
+	FromFile string
+	FromDate string
+	B        []byte
+	ToFile   string
+	ToDate   string
+	Eol      []byte
+	Context  int
+}
+
+// WriteUnifiedDiffBytes is a byte-oriented adapter that splits inputs on '\n'
+// (preserving newlines), delegates to WriteUnifiedDiff, and writes byte output.
+func WriteUnifiedDiffBytes(w io.Writer, diff UnifiedDiffBytes) error {
+	a := SplitLinesBytes(diff.A)
+	b := SplitLinesBytes(diff.B)
+
+	// Convert to []string without interpreting as UTF-8.
+	as := make([]string, len(a))
+	for i := range a {
+		as[i] = string(a[i])
+	}
+	bs := make([]string, len(b))
+	for i := range b {
+		bs[i] = string(b[i])
+	}
+
+	sd := UnifiedDiff{
+		A:        as,
+		FromFile: diff.FromFile,
+		FromDate: diff.FromDate,
+		B:        bs,
+		ToFile:   diff.ToFile,
+		ToDate:   diff.ToDate,
+		Eol:      string(diff.Eol),
+		Context:  diff.Context,
+	}
+	// Use WriteUnifiedDiff into a bytes.Buffer, then write raw bytes to w.
+	var buf bytes.Buffer
+	if err := WriteUnifiedDiff(&buf, sd); err != nil {
+		return err
+	}
+	_, err := w.Write(buf.Bytes())
+	return err
+}
+
+// GetUnifiedDiffBytes is like WriteUnifiedDiffBytes but returns the diff as bytes.
+func GetUnifiedDiffBytes(diff UnifiedDiffBytes) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := WriteUnifiedDiffBytes(&buf, diff); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// ContextDiffBytes mirrors ContextDiff/UnifiedDiff but takes raw bytes.
+type ContextDiffBytes UnifiedDiffBytes
+
+// WriteContextDiffBytes is a byte-oriented adapter for context diffs.
+func WriteContextDiffBytes(w io.Writer, diff ContextDiffBytes) error {
+	a := SplitLinesBytes(diff.A)
+	b := SplitLinesBytes(diff.B)
+
+	as := make([]string, len(a))
+	for i := range a {
+		as[i] = string(a[i])
+	}
+	bs := make([]string, len(b))
+	for i := range b {
+		bs[i] = string(b[i])
+	}
+
+	sd := ContextDiff{
+		A:        as,
+		FromFile: diff.FromFile,
+		FromDate: diff.FromDate,
+		B:        bs,
+		ToFile:   diff.ToFile,
+		ToDate:   diff.ToDate,
+		Eol:      string(diff.Eol),
+		Context:  diff.Context,
+	}
+	var buf bytes.Buffer
+	if err := WriteContextDiff(&buf, sd); err != nil {
+		return err
+	}
+	_, err := w.Write(buf.Bytes())
+	return err
+}
+
+// GetContextDiffBytes returns a context diff as bytes.
+func GetContextDiffBytes(diff ContextDiffBytes) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := WriteContextDiffBytes(&buf, diff); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
 // Split a string on "\n" while preserving them. The output can be used
 // as input for UnifiedDiff and ContextDiff structures.
 func SplitLines(s string) []string {
 	lines := strings.SplitAfter(s, "\n")
 	lines[len(lines)-1] += "\n"
 	return lines
+}
+
+// SplitLinesBytes splits on '\n' while preserving them and ensures the last
+// element ends with a trailing '\n', mirroring SplitLines semantics.
+func SplitLinesBytes(b []byte) [][]byte {
+	parts := bytes.SplitAfter(b, []byte{'\n'})
+	parts[len(parts)-1] = append(parts[len(parts)-1], '\n')
+	return parts
 }
 
 // IsLineJunk reports whether a line is ignorable: blank or containing only a single '#',
@@ -928,6 +1036,35 @@ func NDiffWith(a, b []string, opts NDiffOptions) []string {
 		}
 	}
 	return out
+}
+
+// NDiffBytes is a thin adapter that produces ndiff-style output for byte
+// sequences. It splits inputs on '\n' (preserving newlines) and delegates to
+// the string-based NDiffWith. Intraline hints are disabled to avoid rune
+// decoding of arbitrary bytes; opts.Intraline is ignored.
+func NDiffBytes(a, b []byte, opts NDiffOptions) []byte {
+	al := SplitLinesBytes(a)
+	bl := SplitLinesBytes(b)
+
+	// Convert to []string without interpreting as UTF-8 (Go strings are raw bytes).
+	as := make([]string, len(al))
+	for i := range al {
+		as[i] = string(al[i])
+	}
+	bs := make([]string, len(bl))
+	for i := range bl {
+		bs[i] = string(bl[i])
+	}
+
+	// Disable intraline for byte mode to stay byte-safe.
+	opts.Intraline = false
+	lines := NDiffWith(as, bs, opts)
+	// Join into a single byte slice.
+	var buf bytes.Buffer
+	for _, s := range lines {
+		buf.WriteString(s)
+	}
+	return buf.Bytes()
 }
 
 // Restore reconstructs one of the original sequences (1 or 2) from an ndiff
