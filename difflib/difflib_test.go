@@ -444,22 +444,51 @@ func ExampleNDiff() {
 	//   three
 }
 
+func ExampleNDiffWith() {
+	a := SplitLines("abc")
+	b := SplitLines("axc")
+	delta := NDiffWith(a, b, NDiffOptions{Intraline: true})
+	// Trim trailing spaces on intraline lines for stable example output.
+	for i, s := range delta {
+		if strings.HasPrefix(s, "? ") {
+			s = strings.TrimRight(s, " \n") + "\n"
+			delta[i] = s
+		}
+	}
+	fmt.Print(strings.Join(delta, ""))
+	// Output:
+	// - abc
+	// ?  ^
+	// + axc
+	// ?  ^
+}
+
+func TestNDiffWith_NoIntraline_EqualsNDiff(t *testing.T) {
+	a := SplitLines("one\ntwo\nthree")
+	b := SplitLines("zero\none\nthree")
+	got := NDiffWith(a, b, NDiffOptions{Intraline: false})
+	want := NDiff(a, b)
+	if strings.Join(got, "") != strings.Join(want, "") {
+		t.Fatalf("NDiffWith (no intraline) != NDiff\nGot:\n%s\nWant:\n%s", strings.Join(got, ""), strings.Join(want, ""))
+	}
+}
+
 func ExampleDiffer_Compare() {
-    d := &Differ{}
-    delta := d.Compare(SplitLines("abc"), SplitLines("axc"))
-    // Trim trailing spaces on intraline lines for stable example output.
-    for i, s := range delta {
-        if strings.HasPrefix(s, "? ") {
-            s = strings.TrimRight(s, " \n") + "\n"
-            delta[i] = s
-        }
-    }
-    fmt.Print(strings.Join(delta, ""))
-    // Output:
-    // - abc
-    // ?  ^
-    // + axc
-    // ?  ^
+	d := &Differ{}
+	delta := d.Compare(SplitLines("abc"), SplitLines("axc"))
+	// Trim trailing spaces on intraline lines for stable example output.
+	for i, s := range delta {
+		if strings.HasPrefix(s, "? ") {
+			s = strings.TrimRight(s, " \n") + "\n"
+			delta[i] = s
+		}
+	}
+	fmt.Print(strings.Join(delta, ""))
+	// Output:
+	// - abc
+	// ?  ^
+	// + axc
+	// ?  ^
 }
 
 func TestIsLineJunk(t *testing.T) {

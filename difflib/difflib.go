@@ -22,6 +22,7 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 func min(a, b int) int {
@@ -878,6 +879,57 @@ func NDiff(a, b []string) []string {
 	return out
 }
 
+// NDiffOptions customizes NDiffWith behavior.
+//
+// LineJunk: optional filter to treat some lines as ignorable during matching
+// (e.g., blank lines). When set, it's passed to the line-level matcher.
+// CharJunk: optional filter for intraline comparison to ignore characters
+// (e.g., spaces or tabs); defaults to IsCharacterJunk if nil.
+// Intraline: when true, include "? " guide lines showing intraline changes.
+// If false, output matches basic NDiff-style output without guide lines.
+type NDiffOptions struct {
+	LineJunk  func(string) bool
+	CharJunk  func(rune) bool
+	Intraline bool
+}
+
+// NDiffWith returns a human-readable delta between a and b with options.
+// It preserves NDiff formatting and, when Intraline is true, adds "? " guide lines
+// similar to Python's difflib.ndiff.
+func NDiffWith(a, b []string, opts NDiffOptions) []string {
+	if opts.Intraline {
+		d := &Differ{LineJunk: opts.LineJunk, CharJunk: opts.CharJunk}
+		return d.Compare(a, b)
+	}
+	// No intraline: keep basic output, but still honor LineJunk for matching.
+	m := NewMatcherWithJunk(a, b, true, opts.LineJunk)
+	var out []string
+	for _, op := range m.GetOpCodes() {
+		switch op.Tag {
+		case 'e':
+			for _, line := range a[op.I1:op.I2] {
+				out = append(out, "  "+line)
+			}
+		case 'd':
+			for _, line := range a[op.I1:op.I2] {
+				out = append(out, "- "+line)
+			}
+		case 'i':
+			for _, line := range b[op.J1:op.J2] {
+				out = append(out, "+ "+line)
+			}
+		case 'r':
+			for _, line := range a[op.I1:op.I2] {
+				out = append(out, "- "+line)
+			}
+			for _, line := range b[op.J1:op.J2] {
+				out = append(out, "+ "+line)
+			}
+		}
+	}
+	return out
+}
+
 // Restore reconstructs one of the original sequences (1 or 2) from an ndiff
 // style delta (as produced by NDiff). Lines starting with "? " are ignored if
 // present. Returns nil if 'which' is not 1 or 2.
@@ -922,7 +974,13 @@ type Differ struct {
 //	"  " line common to both sequences
 //	"? " intraline difference guides (only for replacements)
 func (d *Differ) Compare(a, b []string) []string {
-	m := NewMatcher(a, b)
+	// Honor LineJunk by passing it to the matcher when provided.
+	var m *SequenceMatcher
+	if d.LineJunk != nil {
+		m = NewMatcherWithJunk(a, b, true, d.LineJunk)
+	} else {
+		m = NewMatcher(a, b)
+	}
 	var out []string
 	for _, op := range m.GetOpCodes() {
 		switch op.Tag {
@@ -946,7 +1004,7 @@ func (d *Differ) Compare(a, b []string) []string {
 			for i := 0; i < n; i++ {
 				aline := as[i]
 				bline := bs[i]
-				atags, btags := buildIntralineTags(aline, bline)
+				atags, btags := buildIntralineTagsWith(aline, bline, d.CharJunk)
 				out = append(out, "- "+aline)
 				if atags != "" {
 					out = append(out, "? "+atags+"\n")
@@ -971,7 +1029,7 @@ func (d *Differ) Compare(a, b []string) []string {
 
 // buildIntralineTags returns tag strings (without trailing newline) for aline and bline,
 // using '^' for replacements, '-' for deletions (aline only) and '+' for insertions (bline only).
-func buildIntralineTags(aline, bline string) (string, string) {
+func buildIntralineTagsWith(aline, bline string, charJunk func(rune) bool) (string, string) {
 	// Strip trailing newlines for alignment purposes
 	if strings.HasSuffix(aline, "\n") {
 		aline = strings.TrimSuffix(aline, "\n")
@@ -989,7 +1047,16 @@ func buildIntralineTags(aline, bline string) (string, string) {
 	}
 	ma := split(aline)
 	mb := split(bline)
-	sm := NewMatcher(ma, mb)
+	// Default to IsCharacterJunk if not provided.
+	var cj = charJunk
+	if cj == nil {
+		cj = IsCharacterJunk
+	}
+	isJunk := func(s string) bool {
+		r, _ := utf8.DecodeRuneInString(s)
+		return cj(r)
+	}
+	sm := NewMatcherWithJunk(ma, mb, true, isJunk)
 	var atags, btags strings.Builder
 	for _, oc := range sm.GetOpCodes() {
 		switch oc.Tag {
