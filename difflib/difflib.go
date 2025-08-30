@@ -634,7 +634,7 @@ func WriteUnifiedDiff(writer io.Writer, diff UnifiedDiff) error {
 func GetUnifiedDiffString(diff UnifiedDiff) (string, error) {
 	w := &bytes.Buffer{}
 	err := WriteUnifiedDiff(w, diff)
-	return string(w.Bytes()), err
+	return w.String(), err
 }
 
 // Convert range to the "ed" format.
@@ -759,7 +759,7 @@ func WriteContextDiff(writer io.Writer, diff ContextDiff) error {
 func GetContextDiffString(diff ContextDiff) (string, error) {
 	w := &bytes.Buffer{}
 	err := WriteContextDiff(w, diff)
-	return string(w.Bytes()), err
+	return w.String(), err
 }
 
 // UnifiedDiffBytes mirrors UnifiedDiff but takes raw byte content and Eol as bytes.
@@ -866,7 +866,10 @@ func GetContextDiffBytes(diff ContextDiffBytes) ([]byte, error) {
 // as input for UnifiedDiff and ContextDiff structures.
 func SplitLines(s string) []string {
 	lines := strings.SplitAfter(s, "\n")
-	lines[len(lines)-1] += "\n"
+	// Ensure the last element always ends with a trailing newline.
+	if len(lines) > 0 && !strings.HasSuffix(lines[len(lines)-1], "\n") {
+		lines[len(lines)-1] += "\n"
+	}
 	return lines
 }
 
@@ -882,9 +885,7 @@ func SplitLinesBytes(b []byte) [][]byte {
 // possibly surrounded by whitespace. Trailing "\n" is ignored for the purpose of this check.
 // This mirrors Python difflib's IS_LINE_JUNK default.
 func IsLineJunk(line string) bool {
-	if strings.HasSuffix(line, "\n") {
-		line = strings.TrimSuffix(line, "\n")
-	}
+	line = strings.TrimSuffix(line, "\n")
 	t := strings.TrimSpace(line)
 	return t == "" || t == "#"
 }
@@ -1101,6 +1102,14 @@ type Differ struct {
 	// CharJunk filters ignorable characters when computing intraline hints.
 	// Currently unused; placeholder for parity with Python API.
 	CharJunk func(rune) bool
+	// Fancy enables smarter splitting of 'replace' blocks. Default false to
+	// preserve historical greedy behavior unless opted in.
+	Fancy bool
+	// PreserveWS maps intraline guide spaces back to original whitespace
+	// (spaces/tabs) for tab-aware alignment. Default false.
+	PreserveWS bool
+	// TabSize reserved for future _qformat parity; not used yet.
+	TabSize int
 }
 
 // Compare returns an ndiff-style delta including intraline hints for replacements.
@@ -1134,7 +1143,12 @@ func (d *Differ) Compare(a, b []string) []string {
 				out = append(out, "+ "+line)
 			}
 		case 'r':
-			// Pair up lines greedily; remaining are treated as pure inserts/deletes.
+			if d.Fancy {
+				// Use a fancier replacement to find good sync pairs inside the block.
+				out = append(out, d.fancyReplace(a[op.I1:op.I2], b[op.J1:op.J2])...)
+				break
+			}
+			// Greedy 1:1 pairing (original behavior)
 			as := a[op.I1:op.I2]
 			bs := b[op.J1:op.J2]
 			n := min(len(as), len(bs))
@@ -1142,6 +1156,15 @@ func (d *Differ) Compare(a, b []string) []string {
 				aline := as[i]
 				bline := bs[i]
 				atags, btags := buildIntralineTagsWith(aline, bline, d.CharJunk)
+				if d.PreserveWS {
+					sa := strings.TrimSuffix(aline, "\n")
+					sb := strings.TrimSuffix(bline, "\n")
+					atags = keepOriginalWhitespace(atags, sa)
+					btags = keepOriginalWhitespace(btags, sb)
+				}
+				// Ensure guides align to full line width like Python _qformat output
+				atags = padTag(atags, aline)
+				btags = padTag(btags, bline)
 				out = append(out, "- "+aline)
 				if atags != "" {
 					out = append(out, "? "+atags+"\n")
@@ -1151,11 +1174,9 @@ func (d *Differ) Compare(a, b []string) []string {
 					out = append(out, "? "+btags+"\n")
 				}
 			}
-			// Remaining deletions
 			for _, line := range as[n:] {
 				out = append(out, "- "+line)
 			}
-			// Remaining insertions
 			for _, line := range bs[n:] {
 				out = append(out, "+ "+line)
 			}
@@ -1164,16 +1185,141 @@ func (d *Differ) Compare(a, b []string) []string {
 	return out
 }
 
+// fancyReplace tries to split a replacement block into intuitive chunks by
+// pairing lines with the highest character-level similarity (using the same
+// junk filters as intraline tagging). Falls back to greedy pairing when no
+// sufficiently good sync point is found.
+func (d *Differ) fancyReplace(as, bs []string) []string {
+	// Fast paths
+	if len(as) == 0 {
+		var out []string
+		for _, line := range bs {
+			out = append(out, "+ "+line)
+		}
+		return out
+	}
+	if len(bs) == 0 {
+		var out []string
+		for _, line := range as {
+			out = append(out, "- "+line)
+		}
+		return out
+	}
+	if len(as) == 1 && len(bs) == 1 {
+		aline, bline := as[0], bs[0]
+		atags, btags := buildIntralineTagsWith(aline, bline, d.CharJunk)
+		if d.PreserveWS {
+			sa := strings.TrimSuffix(aline, "\n")
+			sb := strings.TrimSuffix(bline, "\n")
+			atags = keepOriginalWhitespace(atags, sa)
+			btags = keepOriginalWhitespace(btags, sb)
+		}
+		// Ensure guides align to full line width like Python _qformat output
+		atags = padTag(atags, aline)
+		btags = padTag(btags, bline)
+		out := []string{"- " + aline}
+		if atags != "" {
+			out = append(out, "? "+atags+"\n")
+		}
+		out = append(out, "+ "+bline)
+		if btags != "" {
+			out = append(out, "? "+btags+"\n")
+		}
+		return out
+	}
+
+	// Find best matching pair across as x bs using character-level similarity.
+	// Threshold chosen to mirror Python's difflib behavior approximately.
+	const minRatio = 0.74
+	bestRatio := 0.0
+	bestI, bestJ := -1, -1
+
+	charRatio := func(x, y string) float64 {
+		// Split into runes as []string for SequenceMatcher.
+		split := func(s string) []string {
+			out := make([]string, 0, len(s))
+			for _, r := range s {
+				out = append(out, string(r))
+			}
+			return out
+		}
+		ma := split(x)
+		mb := split(y)
+		// Use provided CharJunk if any.
+		var cj = d.CharJunk
+		if cj == nil {
+			cj = IsCharacterJunk
+		}
+		isJunk := func(s string) bool {
+			r, _ := utf8.DecodeRuneInString(s)
+			return cj(r)
+		}
+		sm := NewMatcherWithJunk(ma, mb, true, isJunk)
+		return sm.Ratio()
+	}
+
+	for i := range as {
+		for j := range bs {
+			r := charRatio(as[i], bs[j])
+			if r > bestRatio {
+				bestRatio = r
+				bestI, bestJ = i, j
+				if r == 1.0 {
+					break
+				}
+			}
+		}
+	}
+
+	// If no good anchor, fall back to greedy 1:1 pairing like before.
+	if bestRatio < minRatio || bestI < 0 || bestJ < 0 {
+		var out []string
+		n := min(len(as), len(bs))
+		for i := 0; i < n; i++ {
+			aline := as[i]
+			bline := bs[i]
+			atags, btags := buildIntralineTagsWith(aline, bline, d.CharJunk)
+			if d.PreserveWS {
+				sa := strings.TrimSuffix(aline, "\n")
+				sb := strings.TrimSuffix(bline, "\n")
+				atags = keepOriginalWhitespace(atags, sa)
+				btags = keepOriginalWhitespace(btags, sb)
+			}
+			// Ensure guides align to full line width like Python _qformat output
+			atags = padTag(atags, aline)
+			btags = padTag(btags, bline)
+			out = append(out, "- "+aline)
+			if atags != "" {
+				out = append(out, "? "+atags+"\n")
+			}
+			out = append(out, "+ "+bline)
+			if btags != "" {
+				out = append(out, "? "+btags+"\n")
+			}
+		}
+		for _, line := range as[n:] {
+			out = append(out, "- "+line)
+		}
+		for _, line := range bs[n:] {
+			out = append(out, "+ "+line)
+		}
+		return out
+	}
+
+	// Recurse around the best sync point.
+	var out []string
+	out = append(out, d.fancyReplace(as[:bestI], bs[:bestJ])...)
+	out = append(out, d.fancyReplace(as[bestI:bestI+1], bs[bestJ:bestJ+1])...)
+	out = append(out, d.fancyReplace(as[bestI+1:], bs[bestJ+1:])...)
+	return out
+}
+
 // buildIntralineTags returns tag strings (without trailing newline) for aline and bline,
 // using '^' for replacements, '-' for deletions (aline only) and '+' for insertions (bline only).
 func buildIntralineTagsWith(aline, bline string, charJunk func(rune) bool) (string, string) {
 	// Strip trailing newlines for alignment purposes
-	if strings.HasSuffix(aline, "\n") {
-		aline = strings.TrimSuffix(aline, "\n")
-	}
-	if strings.HasSuffix(bline, "\n") {
-		bline = strings.TrimSuffix(bline, "\n")
-	}
+	aline = strings.TrimSuffix(aline, "\n")
+	bline = strings.TrimSuffix(bline, "\n")
 
 	split := func(s string) []string {
 		out := make([]string, 0, len(s))
@@ -1230,4 +1376,43 @@ func buildIntralineTagsWith(aline, bline string, charJunk func(rune) bool) (stri
 		bTag = ""
 	}
 	return aTag, bTag
+}
+
+// keepOriginalWhitespace maps spaces in the tag string back to the original
+// whitespace characters (space or tab) from the corresponding line, so that
+// the intraline guide aligns across tabs without expanding the original text.
+func keepOriginalWhitespace(tag, line string) string {
+	if tag == "" {
+		return tag
+	}
+	// Work on copies without trailing newlines (already stripped by caller).
+	// Iterate runes so tag length (built per-rune) matches positions.
+	// If tag has a blank at position i and the original rune is space or tab,
+	// copy the original whitespace rune into the tag at that position.
+	out := []rune(tag)
+	lrunes := []rune(line)
+	n := min(len(out), len(lrunes))
+	for i := 0; i < n; i++ {
+		if out[i] == ' ' {
+			if lrunes[i] == ' ' || lrunes[i] == '\t' {
+				out[i] = lrunes[i]
+			}
+		}
+	}
+	return string(out)
+}
+
+// padTag extends tag with spaces to match the rune length of line (without trailing '\n').
+func padTag(tag, line string) string {
+	lt := []rune(tag)
+	lr := []rune(strings.TrimSuffix(line, "\n"))
+	if len(lt) >= len(lr) {
+		return tag
+	}
+	var b strings.Builder
+	b.WriteString(tag)
+	for i := len(lt); i < len(lr); i++ {
+		b.WriteByte(' ')
+	}
+	return b.String()
 }

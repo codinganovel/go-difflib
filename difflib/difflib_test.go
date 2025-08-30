@@ -46,7 +46,7 @@ func TestGetOptCodes(t *testing.T) {
 		fmt.Fprintf(w, "%s a[%d:%d], (%s) b[%d:%d] (%s)\n", string(op.Tag),
 			op.I1, op.I2, a[op.I1:op.I2], op.J1, op.J2, b[op.J1:op.J2])
 	}
-	result := string(w.Bytes())
+	result := w.String()
 	expected := `d a[0:1], (q) b[0:0] ()
 e a[1:3], (ab) b[0:2] (ab)
 r a[3:4], (x) b[2:3] (y)
@@ -81,7 +81,7 @@ func TestGroupedOpCodes(t *testing.T) {
 				op.I1, op.I2, op.J1, op.J2)
 		}
 	}
-	result := string(w.Bytes())
+	result := w.String()
 	expected := `group
   e, 5, 8, 5, 8
   i, 8, 8, 8, 9
@@ -701,4 +701,90 @@ func TestDifferIntralineSimple(t *testing.T) {
 	if len(delta) == 5 {
 		assertEqual(t, delta[4], "  \n")
 	}
+}
+
+func TestDifferFancyReplace_CrossAlignExact(t *testing.T) {
+    // Case where the best alignment is cross-wise: one line moves positions.
+    // Greedy pairing would compare unrelated lines first; fancyReplace should
+    // find the exact match and split around it.
+    a := SplitLines("abcd\nwxyz\n")
+    b := SplitLines("wxyz\nabcq\n")
+    d := &Differ{Fancy: true}
+    delta := d.Compare(a, b)
+    // Expect the exact-match line to be recognized as equal and the others as
+    // delete/insert; trailing blank line equal (from SplitLines).
+    want := []string{
+        "- abcd\n",
+        "  wxyz\n",
+        "+ abcq\n",
+        "  \n",
+    }
+    assertEqual(t, delta, want)
+}
+
+func TestDifferFancyReplace_MultiLineWithIntraline(t *testing.T) {
+    // No exact equal lines inside the replacement block; fancyReplace should
+    // align most-similar pairs and emit intraline guides for character diffs.
+    a := SplitLines("spam and eggs\nfoo bar baz\nalpha beta")
+    b := SplitLines("spam n eggs\nalpha bet\nfoo buz baz")
+    d := &Differ{Fancy: true}
+    delta := d.Compare(a, b)
+
+    // Helper to confirm order: "- aline" appears before "+ bline" somewhere.
+    hasOrderedPair := func(aline, bline string) bool {
+        aidx, bidx := -1, -1
+        for i := 0; i < len(delta); i++ {
+            if delta[i] == "- "+aline+"\n" && aidx < 0 {
+                aidx = i
+            }
+            if delta[i] == "+ "+bline+"\n" && bidx < 0 {
+                bidx = i
+            }
+        }
+        return aidx >= 0 && bidx >= 0 && aidx < bidx
+    }
+
+    if !hasOrderedPair("spam and eggs", "spam n eggs") {
+        t.Fatalf("expected pair for spam line not found; delta:\n%s", strings.Join(delta, ""))
+    }
+    if !hasOrderedPair("foo bar baz", "foo buz baz") {
+        t.Fatalf("expected pair for foo line not found; delta:\n%s", strings.Join(delta, ""))
+    }
+    if !hasOrderedPair("alpha beta", "alpha bet") {
+        t.Fatalf("expected pair for alpha line not found; delta:\n%s", strings.Join(delta, ""))
+    }
+
+    // Ensure at least one intraline guide was emitted somewhere.
+    sawGuide := false
+    for _, s := range delta {
+        if strings.HasPrefix(s, "? ") {
+            sawGuide = true
+            break
+        }
+    }
+    if !sawGuide {
+        t.Fatalf("expected at least one intraline '? ' guide; delta:\n%s", strings.Join(delta, ""))
+    }
+}
+
+func TestDifferIntralineTabsPreserved(t *testing.T) {
+    // Ensure intraline guide preserves tabs in the tag line to match visual columns.
+    // Example: change after a tab should keep the tab in '? ' line.
+    a := SplitLines("col1\tvalue\n")
+    b := SplitLines("col1\tvalux\n")
+    d := &Differ{Fancy: true, PreserveWS: true}
+    delta := d.Compare(a, b)
+    // Expect a replacement with intraline; find '? ' lines and ensure they include a tab.
+    sawTabInGuide := false
+    for _, s := range delta {
+        if strings.HasPrefix(s, "? ") {
+            if strings.ContainsRune(s, '\t') {
+                sawTabInGuide = true
+                break
+            }
+        }
+    }
+    if !sawTabInGuide {
+        t.Fatalf("expected intraline guide to preserve tabs; delta:\n%s", strings.Join(delta, ""))
+    }
 }
